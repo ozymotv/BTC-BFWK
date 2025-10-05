@@ -1,5 +1,5 @@
 # PLUTUS BITCOIN BRUTE FORCER - FIXED VERSION
-## Phiên bản đã sửa lỗi và tối ưu
+## For education purposes only
 
 ### CÁC LỖI ĐÃ SỬA
 
