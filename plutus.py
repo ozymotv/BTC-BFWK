@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Plutus Bitcoin Brute Forcer - CPU Limited Version (ASCII-only)
-# This version actually limits CPU usage effectively
+# Plutus Bitcoin Brute Forcer - CPU Limited Version v2
+# Fixed: save_progress() error handling
 
 from fastecdsa import keys, curve
 from ellipticcurve.privateKey import PrivateKey
@@ -24,9 +24,9 @@ except ImportError:
     print("Warning: psutil not installed. CPU limiting features will be restricted.")
     print("Install with: pip install psutil")
 
-DATABASE = r'database/latest/'  # FIXED: typo lastest -> latest
+DATABASE = r'database/latest/'  
 SEED_FILE = 'plutus_seed.txt'
-PROGRESS_SAVE_INTERVAL = 1000
+PROGRESS_SAVE_INTERVAL = 1000000
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
 shutdown_flag = None
@@ -35,7 +35,7 @@ def create_new_seed():
     """Create a new random seed file"""
     try:
         seed = binascii.hexlify(os.urandom(32)).decode('utf-8').upper()
-        with open(SEED_FILE, 'w') as f:
+        with open(SEED_FILE, 'w', encoding='utf-8') as f:
             f.write('seed: {}\n'.format(seed))
             f.write('counter: 0\n')
             f.write('created: {}\n'.format(time.strftime("%Y-%m-%d %H:%M:%S")))
@@ -51,7 +51,7 @@ def load_seed_and_counter():
     seed, counter = None, 0
     try:
         if os.path.exists(SEED_FILE):
-            with open(SEED_FILE, 'r') as f:
+            with open(SEED_FILE, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
                 for line in lines:
                     line = line.strip()
@@ -77,23 +77,37 @@ def load_seed_and_counter():
     return seed, counter
 
 def save_progress(seed, counter):
-    """Save current progress atomically"""
+    """Save current progress atomically with improved error handling"""
+    temp_file = SEED_FILE + '.tmp'
     try:
-        temp_file = SEED_FILE + '.tmp'
-        with open(temp_file, 'w') as f:
+        # Ghi vào temp file với encoding rõ ràng
+        with open(temp_file, 'w', encoding='utf-8') as f:
             f.write('seed: {}\n'.format(seed))
             f.write('counter: {}\n'.format(counter))
             f.write('updated: {}\n'.format(time.strftime("%Y-%m-%d %H:%M:%S")))
-        if os.path.exists(SEED_FILE):
-            os.remove(SEED_FILE)
-        os.rename(temp_file, SEED_FILE)
+            f.flush()
+            os.fsync(f.fileno())  # Đảm bảo data ghi xuống disk
+
+        # Verify temp file được tạo thành công
+        if not os.path.exists(temp_file):
+            raise IOError("Temp file was not created: {}".format(temp_file))
+
+        # Sử dụng os.replace() thay vì os.rename()
+        # os.replace() atomic và hoạt động tốt trên cả Windows/Linux
+        # Nó sẽ overwrite file đích nếu đã tồn tại
+        os.replace(temp_file, SEED_FILE)
+
     except Exception as e:
         print('Error saving progress: {}'.format(e))
+        print('Current directory: {}'.format(os.getcwd()))
+        print('Temp file exists: {}'.format(os.path.exists(temp_file)))
+        # Cleanup temp file nếu nó tồn tại
         if os.path.exists(temp_file):
             try:
                 os.remove(temp_file)
-            except:
-                pass
+                print('Cleaned up temp file')
+            except Exception as cleanup_error:
+                print('Failed to cleanup temp file: {}'.format(cleanup_error))
 
 def generate_private_key_deterministic(seed, counter):
     """Generate deterministic private key"""
@@ -284,10 +298,8 @@ def main(database, args, seed, global_counter, counter_lock, process_id, shutdow
     start_time = time.time()
 
     # Calculate sleep time for CPU limiting
-    # Formula: to use X% CPU, work then sleep for (100-X)/X ratio
     cpu_limit = args['cpu_limit']
     if cpu_limit < 100:
-        # Process N keys, then sleep
         keys_per_batch = max(1, int(cpu_limit / 10))
         sleep_per_batch = (100 - cpu_limit) / cpu_limit * 0.01
     else:
@@ -302,7 +314,6 @@ def main(database, args, seed, global_counter, counter_lock, process_id, shutdow
     try:
         batch_count = 0
         while not shutdown_event.is_set():
-            # Get next counter atomically
             with counter_lock:
                 counter = global_counter.value
                 global_counter.value += 1
@@ -310,7 +321,6 @@ def main(database, args, seed, global_counter, counter_lock, process_id, shutdow
             if keys_processed % 100 == 0 and shutdown_event.is_set():
                 break
 
-            # Generate and check key
             private_key = generate_private_key_deterministic(seed, counter)
             if private_key is None:
                 continue
@@ -326,14 +336,12 @@ def main(database, args, seed, global_counter, counter_lock, process_id, shutdow
             keys_processed += 1
             batch_count += 1
 
-            # Verbose output
             if args['verbose'] and keys_processed % 100 == 0:
                 elapsed = time.time() - start_time
                 rate = keys_processed / elapsed if elapsed > 0 else 0
                 print('P{}: {} | {:,} | {:.1f} k/s'.format(
                     process_id, address, counter, rate))
 
-            # Check for match
             if address[-args['substring']:] in database:
                 print('\n[MATCH] Process {}: Verifying...'.format(process_id))
                 found_match = False
@@ -362,12 +370,10 @@ def main(database, args, seed, global_counter, counter_lock, process_id, shutdow
                 except Exception as e:
                     print('Error verifying: {}'.format(e))
 
-            # EFFECTIVE CPU THROTTLING - Sleep after batch
             if cpu_limit < 100 and batch_count >= keys_per_batch:
                 time.sleep(sleep_per_batch)
                 batch_count = 0
 
-            # Save progress periodically
             if counter - last_save_counter >= PROGRESS_SAVE_INTERVAL:
                 try:
                     with counter_lock:
@@ -405,39 +411,33 @@ def signal_handler(signum, frame):
 def print_help():
     print("""
 ===============================================================================
-Plutus Bitcoin Brute Forcer - CPU Limited Version (ACTUALLY WORKS)
+Plutus Bitcoin Brute Forcer - CPU Limited Version v2 (FIXED)
 ===============================================================================
 
 USAGE:
-python3 plutus_cpu_limited.py [options]
+python3 plutus_cpu_limited_fixed_v2.py [options]
 
 OPTIONS:
 verbose=0/1         Show addresses (default: 0)
 substring=N         Match last N chars (default: 8, range: 1-26)
 cpu_count=N         Number of processes (default: all cores)
-cpu_limit=N         CPU limit % - THIS ACTUALLY WORKS (default: 80, range: 1-100)
+cpu_limit=N         CPU limit % (default: 80, range: 1-100)
 priority=LEVEL      Priority: low, below_normal, normal (default: below_normal)
 reset_seed          Start with new seed
 
 EXAMPLES:
-python3 plutus_cpu_limited.py                       # 80% CPU (default)
-python3 plutus_cpu_limited.py cpu_limit=30          # 30% CPU limit
-python3 plutus_cpu_limited.py cpu_limit=50 cpu_count=2  # 2 cores, 50% each
-python3 plutus_cpu_limited.py priority=low cpu_limit=20 # Background mode
+python3 plutus_cpu_limited_fixed_v2.py                      # 80% CPU
+python3 plutus_cpu_limited_fixed_v2.py cpu_limit=30         # 30% CPU
+python3 plutus_cpu_limited_fixed_v2.py cpu_limit=50 cpu_count=2
 
-CPU LIMITING EXPLAINED:
-- cpu_limit=30  -> Uses ~30% CPU per process
-- cpu_limit=50  -> Uses ~50% CPU per process
-- cpu_limit=80  -> Uses ~80% CPU per process (default)
-- cpu_limit=100 -> No limiting, full speed
-
-With 4 processes at 30% each = ~120% total (1.2 cores of CPU)
-With 2 processes at 50% each = ~100% total (1 core of CPU)
+FIXES IN V2:
+- Fixed save_progress() error with os.replace()
+- Better error handling and debugging
+- Improved file write atomicity
 
 NOTES:
-- CPU limiting uses strategic sleep intervals
-- Lower limit = slower but more CPU available for other tasks
-- Install psutil for better priority control: pip install psutil
+- Install psutil for better CPU control: pip install psutil
+- Database folder: database/latest/
 """)
     sys.exit(0)
 
