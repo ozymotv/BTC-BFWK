@@ -20,11 +20,13 @@
 ```bash
 pip install fastecdsa
 pip install ellipticcurve
+pip install pybloomfiltermmap3
 ```
 
 **Dependencies tùy chọn (khuyến nghị):**
 ```bash
-pip install psutil  # Cho CPU limiting tốt hơn
+pip install psutil  
+pip install pybloomfiltermmap3
 ```
 
 **Cấu trúc thư mục:**
@@ -43,7 +45,7 @@ pip install psutil  # Cho CPU limiting tốt hơn
 
 **1. Cài đặt dependencies:**
 ```bash
-pip install fastecdsa ellipticcurve psutil
+pip install fastecdsa ellipticcurve psutil pybloomfiltermmap3
 ```
 
 **2. Tạo thư mục database:**
